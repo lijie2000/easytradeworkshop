@@ -1,11 +1,16 @@
 package com.dynatrace.easytrade.creditcardorderservice;
 
 import com.dynatrace.easytrade.creditcardorderservice.models.*;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
+
 import java.sql.*;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+
+import javax.sql.DataSource;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -199,8 +204,61 @@ public class DatabaseHelper {
         }
     }
 
+    /**
+     * Lazily-initialized bounded connection pool.
+     *
+     * <p>Previously every {@code getConnection()} opened a brand-new JDBC
+     * connection via {@code DriverManager} (full TCP + TLS + auth handshake per
+     * call). Production telemetry shows ~0.86 DB calls per inbound request; at
+     * 100x peak (~23 req/s) that is a per-request connection storm and the first
+     * thing to saturate. HikariCP bounds and reuses connections instead.
+     *
+     * <p>Pool size and timeouts are env-tunable with safe defaults. The pool is
+     * built on first use so that unit tests (which mock {@code getConnection})
+     * and any no-DB path never trigger pool creation.
+     */
+    private volatile DataSource dataSource;
+
+    private DataSource dataSource() {
+        DataSource ds = dataSource;
+        if (ds == null) {
+            synchronized (this) {
+                ds = dataSource;
+                if (ds == null) {
+                    HikariConfig config = new HikariConfig();
+                    config.setJdbcUrl(System.getenv("MSSQL_CONNECTIONSTRING"));
+                    config.setPoolName("ccos-mssql-pool");
+                    config.setMaximumPoolSize((int) longEnv("DB_POOL_MAX_SIZE", 30));
+                    config.setMinimumIdle((int) longEnv("DB_POOL_MIN_IDLE", 5));
+                    // Fail fast instead of queueing request threads forever when the
+                    // pool is exhausted -- surfaces saturation as a quick error, not a hang.
+                    config.setConnectionTimeout(longEnv("DB_POOL_CONNECTION_TIMEOUT_MS", 3000));
+                    config.setValidationTimeout(longEnv("DB_POOL_VALIDATION_TIMEOUT_MS", 2000));
+                    config.setMaxLifetime(longEnv("DB_POOL_MAX_LIFETIME_MS", 1800000));
+                    config.setIdleTimeout(longEnv("DB_POOL_IDLE_TIMEOUT_MS", 600000));
+                    // Registers HikariCP's own pool metrics (active/idle/pending/wait)
+                    // -- closes the "no connection-pool telemetry" gap.
+                    config.setRegisterMbeans(true);
+                    dataSource = ds = new HikariDataSource(config);
+                    logger.info("Initialized HikariCP pool '{}' (maxPoolSize={}, connectionTimeoutMs={})",
+                            config.getPoolName(), config.getMaximumPoolSize(), config.getConnectionTimeout());
+                }
+            }
+        }
+        return ds;
+    }
+
     public Connection getConnection() throws SQLException {
-        return DriverManager.getConnection(System.getenv("MSSQL_CONNECTIONSTRING"));
+        return dataSource().getConnection();
+    }
+
+    private static long longEnv(String key, long def) {
+        String v = System.getenv(key);
+        try {
+            return (v == null || v.isBlank()) ? def : Long.parseLong(v);
+        } catch (NumberFormatException e) {
+            return def;
+        }
     }
 
     public Optional<CreditCardOrderStatus> getLastOrderStatusForAccountId(Connection conn, Integer accountId)

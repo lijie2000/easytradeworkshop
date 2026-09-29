@@ -33,6 +33,11 @@ dependencies {
 
     implementation 'com.microsoft.sqlserver:mssql-jdbc:12.10.2.jre11'
 
+    // Bounded JDBC connection pool. The service previously opened a brand-new
+    // connection per call via DriverManager, which becomes a connection storm at
+    // scale (each inbound request drives ~0.86 DB calls per production telemetry).
+    implementation 'com.zaxxer:HikariCP:6.2.1'
+
     //lombok
     compileOnly 'org.projectlombok:lombok:1.18.42'
     annotationProcessor 'org.projectlombok:lombok:1.18.42'

@@ -13,6 +13,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.sql.Connection;
+import java.time.Duration;
 import java.util.List;
 
 @Service
@@ -20,7 +21,15 @@ public class WorkScheduler extends BaseScheduler {
     private static final Logger logger = LoggerFactory.getLogger(WorkScheduler.class);
     private final DatabaseHelper dbHelper;
     private final String creditCardOrderService = System.getenv("THIRD_PARTY_SERVICE_HOSTANDPORT");
-    private final HttpClient httpClient = HttpClient.newBuilder().build();
+
+    // third-party-service shows a rare but severe tail (7d p99 ~4.7s). An
+    // unbounded HttpClient here lets a single stalled call block the scheduler
+    // thread for the full tail. Bound connect + per-request read; tunable via env.
+    private final HttpClient httpClient = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofMillis(longEnv("THIRD_PARTY_CONNECT_TIMEOUT_MS", 2000)))
+            .build();
+    private final Duration requestTimeout =
+            Duration.ofMillis(longEnv("THIRD_PARTY_REQUEST_TIMEOUT_MS", 3000));
 
     public WorkScheduler(DatabaseHelper dbHelper) {
         super("work", Integer.parseInt(System.getenv("WORK_DELAY")), Integer.parseInt(System.getenv("WORK_RATE")));
@@ -42,6 +51,7 @@ public class WorkScheduler extends BaseScheduler {
                 // deepcode ignore Ssrf: trusted environment variable
                 HttpRequest request = HttpRequest.newBuilder()
                         .uri(URI.create(String.format("http://%s/v1/manufacturer", creditCardOrderService)))
+                        .timeout(requestTimeout)
                         .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(body)))
                         .header("Content-Type", "application/json")
                         .build();
@@ -64,5 +74,14 @@ public class WorkScheduler extends BaseScheduler {
         logger.info("Finished WorkScheduler task!");
 
         randomFixedRatePlusSleep();
+    }
+
+    private static long longEnv(String key, long def) {
+        String v = System.getenv(key);
+        try {
+            return (v == null || v.isBlank()) ? def : Long.parseLong(v);
+        } catch (NumberFormatException e) {
+            return def;
+        }
     }
 }
