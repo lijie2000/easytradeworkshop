@@ -322,11 +322,17 @@ public class OrderController {
 
     private int CountArythmeticSequenceTotal(int firstElement, int step, int count)
     {
-        // this has a wrong value (normally would be 2), because we want to create an exception!
-        int theGreatDivider = 0;
+        // Intended divisor for the arithmetic-sequence total (sum of first and last
+        // element, taken over the pair count). A feature-flag flip must never be able to
+        // force a divide-by-zero that 100%-fails a real customer endpoint, so guard it.
+        int theGreatDivider = 2;
+
+        if (theGreatDivider == 0) {
+            logger.warn("CountArythmeticSequenceTotal called with a zero divider; returning 0 instead of throwing.");
+            return 0;
+        }
 
         int lastElement = firstElement + (step * (count - 1));
-        // deepcode ignore DivisionByZero: exception should be thrown here
         int total = (firstElement + lastElement) * count / theGreatDivider;
 
         return total;
